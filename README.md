@@ -11,8 +11,8 @@ Verifiable on-chain sanctions screening powered by [Turnkey Verifiable Cloud](ht
 - [What you'll build](#what-youll-build)
 - [Project structure](#project-structure)
 - [Prerequisites](#prerequisites)
-- [Step 1 — Clone and configure environment](#step-1--clone-and-configure-environment)
-- [Step 2 — Set up the Turnkey Auth Proxy](#step-2--set-up-the-turnkey-auth-proxy)
+- [Step 1 — Set up the Turnkey Auth Proxy](#step-1--set-up-the-turnkey-auth-proxy)
+- [Step 2 — Clone and configure environment](#step-2--clone-and-configure-environment)
 - [Step 3 — Install and run the Next.js app locally](#step-3--install-and-run-the-nextjs-app-locally-no-tvc-yet)
 - [Step 4 — Build and test the Go TVC app locally](#step-4--build-and-test-the-go-tvc-app-locally)
 - [Step 5 — Build and push the Docker image to GHCR](#step-5--build-and-push-the-docker-image-to-ghcr)
@@ -63,9 +63,9 @@ Chainalysis Sanctions API
 ```
 tvc-chainalysis/
 ├── apps/
-│   ├── tvc-app/          # Go pivot binary — runs inside the enclave
+│   ├── tvc-app/          # Go binary — runs inside the enclave
 │   │   ├── main.go           # HTTP server: GET /health, POST /screen
-│   │   ├── chainalysis.go    # Chainalysis Sanctions API client + mocked addresses
+│   │   ├── chainalysis.go    # Chainalysis Sanctions API client
 │   │   ├── proof.go          # Ephemeral key loading, app proof signing, boot key derivation
 │   │   ├── go.mod
 │   │   └── Dockerfile
@@ -98,7 +98,7 @@ tvc-chainalysis/
 - **Node.js 18+** — `brew install node`
 - **pnpm** — `npm install -g pnpm`
 - **Rust** — `curl https://sh.rustup.rs -sSf | sh` (needed for the `tvc` CLI)
-- **`tvc` CLI** — `cargo install tvc`
+- **`tvc` CLI** — `cargo install tvc` (see the [`tvc` crate README](https://crates.io/crates/tvc) for the latest install instructions)
 - **Docker** — for building and pushing the TVC container image
 - **GitHub account** — for GHCR (free public image hosting)
 - **Turnkey account** — `https://app.turnkey.com`
@@ -108,7 +108,23 @@ tvc-chainalysis/
 
 ---
 
-## Step 1 — Clone and configure environment
+## Step 1 — Set up the Turnkey Auth Proxy
+
+The Auth Proxy lets the frontend call Turnkey without exposing your parent org's API key in the browser. The `handleLogin()` modal is powered by it. Set it up first so you have the Config ID ready when you fill in the env file in the next step.
+
+1. Go to **https://app.turnkey.com/dashboard/auth**
+2. Click **Auth Proxy** tab → toggle it **ON**
+3. Under **Allowed Origins**, add:
+   - `http://localhost:3000` (local dev)
+   - Your production URL (e.g. `https://your-app.vercel.app`)
+4. Under **Authentication Methods**, enable **Passkey** (disable email OTP if you want passkey-only)
+5. Copy the **Auth Proxy Config ID** → you'll paste it into `NEXT_PUBLIC_AUTH_PROXY_CONFIG_ID` in the next step
+
+---
+
+## Step 2 — Clone and configure environment
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/YOUR_GITHUB_ORG_OR_USERNAME/tvc-chainalysis.git
@@ -118,7 +134,7 @@ cd tvc-chainalysis
 Copy the example env file and fill in your values:
 
 ```bash
-cp .env.example apps/web/.env.local
+cp apps/web/.env.example apps/web/.env.local
 ```
 
 Open `apps/web/.env.local` and fill in:
@@ -130,23 +146,9 @@ Open `apps/web/.env.local` and fill in:
 | `TURNKEY_API_PRIVATE_KEY` | Same (shown once on creation) |
 | `TURNKEY_ORG_ID` | Turnkey dashboard → Settings → Organization |
 | `NEXT_PUBLIC_TURNKEY_ORG_ID` | Same as above |
-| `NEXT_PUBLIC_AUTH_PROXY_CONFIG_ID` | See Step 2 below |
+| `NEXT_PUBLIC_AUTH_PROXY_CONFIG_ID` | The Auth Proxy Config ID from Step 1 |
 
 Leave `TVC_APP_URL` and `TVC_APP_ID` empty for now — you'll fill those in after deploying the TVC app.
-
----
-
-## Step 2 — Set up the Turnkey Auth Proxy
-
-The Auth Proxy lets the frontend call Turnkey without exposing your parent org's API key in the browser. The `handleLogin()` modal is powered by it.
-
-1. Go to **https://app.turnkey.com/dashboard/auth**
-2. Click **Auth Proxy** tab → toggle it **ON**
-3. Under **Allowed Origins**, add:
-   - `http://localhost:3000` (local dev)
-   - Your production URL (e.g. `https://your-app.vercel.app`)
-4. Under **Authentication Methods**, enable **Passkey** (disable email OTP if you want passkey-only)
-5. Copy the **Auth Proxy Config ID** → paste into `NEXT_PUBLIC_AUTH_PROXY_CONFIG_ID`
 
 ---
 
@@ -169,7 +171,7 @@ Visit `http://localhost:3000`. You'll see the login prompt with a **Log in / Sig
 4. On success `authState` becomes `Authenticated` and the screening tool appears
 5. Sign-out calls `logout()` from `useTurnkey()` — no server-side session involved
 
-Authentication is entirely client-side via `@turnkey/react-wallet-kit`. No cookies, no JWTs, no custom session management.
+Authentication is entirely client-side via `@turnkey/react-wallet-kit`. No cookies, no JWTs, no custom session management. See [Getting started with Turnkey's Embedded Wallet Kit](https://docs.turnkey.com/solutions/embedded-wallets/integration-guide/react/getting-started) to learn more.
 
 ---
 
@@ -188,7 +190,7 @@ CHAINALYSIS_API_KEY=your-key ./tvc_app --port 3000
 curl http://localhost:3000/health
 # → {"status":"ok"}
 
-# Screen a known sanctioned address (mocked — see note on egress below)
+# Screen a known sanctioned address (real Chainalysis call — see note on egress below)
 curl -X POST http://localhost:3000/screen \
   -H "Content-Type: application/json" \
   -d '{"address":"0x1da5821544e25c636c1417ba96ade4cf6d2f9b5a"}'
@@ -198,16 +200,13 @@ curl -X POST http://localhost:3000/screen \
 
 ### Note on egress
 
-TVC external connectivity (`externalConnectivity: true`) is not yet fully supported. The Chainalysis API call logic is in place in `chainalysis.go` in anticipation of the feature release.
+`CheckAddress` calls the Chainalysis Sanctions API for every address. Inside the enclave this requires TVC external connectivity (`externalConnectivity: true`) to be enabled so the app can reach `public.chainalysis.com`.
 
-In the meantime, `CheckAddress` short-circuits to hardcoded responses for two demo addresses before attempting any network call:
+This address is useful for testing a known result against the live API:
 
 | Address | Result |
 |---|---|
 | `0x1da5821544e25c636c1417ba96ade4cf6d2f9b5a` | Sanctioned (OFAC SDN — Secondeye Solution) |
-| `0xffc93b73e5f9fa038598b675ed394faed168688b` | Clean |
-
-Any other address will attempt the real Chainalysis API call (which will fail inside the enclave until egress is enabled).
 
 ---
 
@@ -443,7 +442,7 @@ In the Vercel dashboard, add all the env vars from `.env.local` (the `NEXT_PUBLI
 When you screen an address:
 
 1. The Next.js API calls `POST /screen` on the TVC Go app running in the enclave
-2. The enclave checks the address (mocked or via Chainalysis) and **signs the result** with its ephemeral P-256 private key — a key derived from the QOS master seed that never leaves the enclave
+2. The enclave checks the address via the Chainalysis Sanctions API and **signs the result** with its ephemeral P-256 private key — a key derived from the QOS master seed that never leaves the enclave
 3. The response includes:
    - `appProof` — scheme, public key, the signed JSON payload, and the signature
    - `bootEphemeralKey` — the 130-byte QOS KeySet (encrypt pubkey + sign pubkey) derived from the same master seed
@@ -503,51 +502,11 @@ Replace the `@sha256:...` in the `Dockerfile` `FROM` line with the new digest.
 
 ## Database schema
 
-```sql
--- One row per authenticated Turnkey user (sub-org).
-CREATE TABLE users (
-  id TEXT PRIMARY KEY,
-  turnkey_user_id TEXT NOT NULL UNIQUE,
-  turnkey_sub_org_id TEXT NOT NULL UNIQUE,
-  turnkey_wallet_id TEXT NOT NULL UNIQUE,
-  wallet_address TEXT NOT NULL UNIQUE,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+The schema is defined with Drizzle in [`apps/web/db/schema.ts`](apps/web/db/schema.ts) — see that file for the authoritative, up-to-date definition. There are three tables:
 
--- One row per transaction intent (created before screening, updated after).
-CREATE TABLE transactions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES users(id),
-  from_address TEXT NOT NULL,
-  to_address TEXT NOT NULL,
-  value_wei TEXT NOT NULL,
-  data TEXT NOT NULL DEFAULT '0x',
-  chain_id INTEGER NOT NULL,
-  tx_hash TEXT,
-  status TEXT NOT NULL DEFAULT 'pending', -- pending | submitted | confirmed | blocked
-  submitted_at TEXT,
-  confirmed_at TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- Full audit log of every sanctions screening.
-CREATE TABLE screenings (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES users(id),
-  transaction_id TEXT NOT NULL REFERENCES transactions(id),
-  address TEXT NOT NULL,
-  is_sanctioned INTEGER NOT NULL DEFAULT 0,
-  identifications TEXT NOT NULL,   -- JSON array
-  proof_scheme TEXT,
-  proof_public_key TEXT,
-  proof_payload TEXT,
-  proof_signature TEXT,
-  boot_proof TEXT,                 -- JSON object (null if proof fetch failed)
-  outcome TEXT NOT NULL,           -- allowed | blocked
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-```
+- **`users`** — one row per authenticated Turnkey user (sub-org)
+- **`transactions`** — one row per transaction intent (created before screening, updated after)
+- **`screenings`** — full audit log of every sanctions screening, including both proofs
 
 Run `pnpm db:studio` from `apps/web/` to browse the database in a web UI.
 

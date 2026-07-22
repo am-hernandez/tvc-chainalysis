@@ -1,43 +1,48 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
-import { screenAddress } from "@/lib/tvc";
+import { z } from "zod";
+import { screenAddress } from "@/lib/tvc-app";
 import { turnkey } from "@/lib/turnkey";
 import { db } from "@/db";
 import { users, transactions, screenings } from "@/db/schema";
 
-export async function POST(req: NextRequest) {
-  const { address, orgId, userId, walletAddress, walletId, valueWei, chainId } =
-    await req.json();
+// Request/response shapes for the Turnkey get_boot_proof query.
+type GetBootProofRequest = { organizationId: string; ephemeralKey: string };
+type GetBootProofResponse = { bootProof: Record<string, unknown> };
 
-  if (!address || typeof address !== "string")
-    return NextResponse.json({ error: "address is required" }, { status: 400 });
-  if (!orgId || typeof orgId !== "string")
-    return NextResponse.json({ error: "orgId is required" }, { status: 400 });
-  if (!userId || typeof userId !== "string")
-    return NextResponse.json({ error: "userId is required" }, { status: 400 });
-  if (!walletAddress || typeof walletAddress !== "string")
-    return NextResponse.json({ error: "walletAddress is required" }, { status: 400 });
+// Shape of the POST /api/screen request body. The first four fields are
+// required; the rest carry send-transaction context and default downstream.
+const ScreenRequestSchema = z.object({
+  address: z.string().min(1),
+  orgId: z.string().min(1),
+  userId: z.string().min(1),
+  walletAddress: z.string().min(1),
+  walletId: z.string().optional(),
+  valueWei: z.string().optional(),
+  chainId: z.number().optional(),
+});
+
+export async function POST(req: NextRequest) {
+  const parsed = ScreenRequestSchema.safeParse(await req.json());
+  if (!parsed.success) {
+    const field = parsed.error.issues[0]?.path[0] ?? "request";
+    return NextResponse.json(
+      { error: `${String(field)} is required` },
+      { status: 400 },
+    );
+  }
+  const { address, orgId, userId, walletAddress, walletId, valueWei, chainId } =
+    parsed.data;
 
   const destinationAddress = address.trim();
 
   // Find or create the user record for this Turnkey sub-org.
-  let [user] = await db
-    .select()
-    .from(users)
-    .where(eq(users.turnkeySubOrgId, orgId))
-    .limit(1);
-
-  if (!user) {
-    const newUser = {
-      id: crypto.randomUUID(),
-      turnkeyUserId: userId,
-      turnkeySubOrgId: orgId,
-      turnkeyWalletId: walletId ?? userId,
-      walletAddress,
-    };
-    await db.insert(users).values(newUser);
-    user = { ...newUser, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-  }
+  const user = await findOrCreateUser({
+    orgId,
+    userId,
+    walletId,
+    walletAddress,
+  });
 
   // Create the transaction intent before screening — it exists regardless of outcome.
   const txId = crypto.randomUUID();
@@ -62,13 +67,15 @@ export async function POST(req: NextRequest) {
   let bootProof: Record<string, unknown> | null = null;
   if (screening.bootEphemeralKey) {
     try {
-      const resp = await turnkey.apiClient().request<
-        { organizationId: string; ephemeralKey: string },
-        { bootProof: Record<string, unknown> }
-      >("/public/v1/query/get_boot_proof", {
-        organizationId: process.env.TURNKEY_ORG_ID!,
-        ephemeralKey: screening.bootEphemeralKey,
-      });
+      const resp = await turnkey
+        .apiClient()
+        .request<GetBootProofRequest, GetBootProofResponse>(
+          "/public/v1/query/get_boot_proof",
+          {
+            organizationId: process.env.TURNKEY_ORG_ID!,
+            ephemeralKey: screening.bootEphemeralKey,
+          },
+        );
       bootProof = resp.bootProof;
     } catch (err) {
       console.error("Failed to fetch boot proof:", err);
@@ -152,4 +159,33 @@ export async function GET(req: NextRequest) {
       })
     ),
   });
+}
+
+// Look up the user for a Turnkey sub-org, creating the record on first sight.
+async function findOrCreateUser(params: {
+  orgId: string;
+  userId: string;
+  walletId?: string;
+  walletAddress: string;
+}): Promise<typeof users.$inferSelect> {
+  const [existing] = await db
+    .select()
+    .from(users)
+    .where(eq(users.turnkeySubOrgId, params.orgId))
+    .limit(1);
+  if (existing) return existing;
+
+  const newUser = {
+    id: crypto.randomUUID(),
+    turnkeyUserId: params.userId,
+    turnkeySubOrgId: params.orgId,
+    turnkeyWalletId: params.walletId ?? params.userId,
+    walletAddress: params.walletAddress,
+  };
+  await db.insert(users).values(newUser);
+  return {
+    ...newUser,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
 }

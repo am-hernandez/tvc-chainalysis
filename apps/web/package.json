@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
     "db:push": "drizzle-kit push",
     "db:reset": "rm -f local.db && drizzle-kit push",
     "db:studio": "drizzle-kit studio"
@@ -16,9 +16,10 @@
     "@turnkey/sdk-server": "^1.7.3",
     "better-sqlite3": "^12.9.0",
     "drizzle-orm": "^0.30.10",
-    "next": "^16.2.3",
+    "next": "^16.2.10",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

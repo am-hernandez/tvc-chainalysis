@@ -2,12 +2,23 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 )
+
+// caCertsPEM is the CA trust bundle compiled into the binary. Trust roots are
+// embedded rather than read from the container filesystem so the app is fully
+// self-contained inside the TVC enclave: the exact CA set is covered by the
+// attested pivot binary digest, and there's no dependency on /etc/ssl/certs,
+// which isn't reliably honored in the minimal enclave image.
+//
+//go:embed ca-certificates.crt
+var caCertsPEM []byte
 
 // Identification represents a single sanctions match returned by Chainalysis.
 type Identification struct {
@@ -29,55 +40,33 @@ type ChainalysisClient struct {
 	httpClient *http.Client
 }
 
-// NewChainalysisClient creates a client using the provided API key.
+// NewChainalysisClient creates a client using the provided API key. It verifies
+// TLS against the embedded CA bundle only (see caCertsPEM), so it does not rely
+// on system certificates being present in the enclave image.
 func NewChainalysisClient(apiKey string) *ChainalysisClient {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCertsPEM) {
+		// The bundle is baked in at build time; a parse failure means the build
+		// is broken, so fail loudly rather than silently falling back to no roots.
+		panic("tvc-app: failed to parse embedded CA bundle (ca-certificates.crt)")
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+
 	return &ChainalysisClient{
 		apiKey:  apiKey,
 		baseURL: "https://public.chainalysis.com",
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: transport,
 		},
 	}
-}
-
-// mockedAddresses short-circuits the Chainalysis API call for known test
-// addresses so the enclave (which has no external network access) can still
-// return realistic results during demos.
-var mockedAddresses = map[string]*chainalysisResponse{
-	"0x1da5821544e25c636c1417ba96ade4cf6d2f9b5a": {
-		Identifications: []Identification{
-			{
-				Category: "sanctioned entity",
-				Name:     "SANCTIONED ENTITY: OFAC SDN Secondeye Solution 2021-04-15 1da5821544e25c636c1417ba96ade4cf6d2f9b5a",
-				Description: "Pakistan-based Secondeye Solution (SES), also known as Forwarderz, is a synthetic identity document vendor that was added to the OFAC SDN list in April 2021.\n\n" +
-					"SES customers could buy fake identity documents to sign up for accounts with cryptocurrency exchanges, payment providers, banks, and more under false identities. " +
-					"According to the US Treasury Department, SES assisted the Internet Research Agency (IRA), the Russian troll farm that OFAC designated pursuant to E.O. 13848 in 2018 " +
-					"for interfering in the 2016 presidential election, in concealing its identity to evade sanctions.\n\nhttps://home.treasury.gov/news/press-releases/jy0126",
-				URL: "https://home.treasury.gov/news/press-releases/jy0126",
-			},
-			{
-				Category: "sanctions",
-				Name:     "SANCTIONS: OFAC SDN Secondeye Solution 2021-04-15 1da5821544e25c636c1417ba96ade4cf6d2f9b5a",
-				Description: "Pakistan-based Secondeye Solution (SES), also known as Forwarderz, is a synthetic identity document vendor that was added to the OFAC SDN list in April 2021.\n\n" +
-					"SES customers could buy fake identity documents to sign up for accounts with cryptocurrency exchanges, payment providers, banks, and more under false identities. " +
-					"According to the US Treasury Department, SES assisted the Internet Research Agency (IRA), the Russian troll farm that OFAC designated pursuant to E.O. 13848 in 2018 " +
-					"for interfering in the 2016 presidential election, in concealing its identity to evade sanctions.\n\nhttps://home.treasury.gov/news/press-releases/jy0126",
-				URL: "https://home.treasury.gov/news/press-releases/jy0126",
-			},
-		},
-	},
-	"0xffc93b73e5f9fa038598b675ed394faed168688b": {
-		Identifications: []Identification{},
-	},
 }
 
 // CheckAddress queries the Chainalysis Sanctions API for the given address.
 // Returns the raw API response; an empty Identifications slice means clean.
 func (c *ChainalysisClient) CheckAddress(ctx context.Context, address string) (*chainalysisResponse, error) {
-	if mocked, ok := mockedAddresses[strings.ToLower(address)]; ok {
-		return mocked, nil
-	}
-
 	url := fmt.Sprintf("%s/api/v1/address/%s", c.baseURL, address)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -103,6 +92,13 @@ func (c *ChainalysisClient) CheckAddress(ctx context.Context, address string) (*
 	var result chainalysisResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	// Normalize a nil slice to an empty one so it marshals to a JSON array
+	// (`[]`) rather than `null`, keeping the API response shape stable for
+	// clients regardless of whether the address had any identifications.
+	if result.Identifications == nil {
+		result.Identifications = []Identification{}
 	}
 
 	return &result, nil
